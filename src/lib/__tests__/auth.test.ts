@@ -2,18 +2,21 @@ import { test, expect, vi, beforeEach } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
-const mockCookieSet = vi.fn();
+const { mockCookieSet, mockCookieGet } = vi.hoisted(() => ({
+  mockCookieSet: vi.fn(),
+  mockCookieGet: vi.fn(),
+}));
 
 vi.mock("next/headers", () => ({
   cookies: vi.fn().mockResolvedValue({
     set: mockCookieSet,
-    get: vi.fn(),
+    get: mockCookieGet,
     delete: vi.fn(),
   }),
 }));
 
-import { createSession } from "@/lib/auth";
-import { jwtVerify } from "jose";
+import { createSession, getSession } from "@/lib/auth";
+import { SignJWT, jwtVerify } from "jose";
 
 const JWT_SECRET = new TextEncoder().encode("development-secret-key");
 
@@ -63,4 +66,49 @@ test("createSession sets cookie sameSite to lax and path to /", async () => {
   const [, , options] = mockCookieSet.mock.calls[0];
   expect(options.sameSite).toBe("lax");
   expect(options.path).toBe("/");
+});
+
+// --- getSession ---
+
+async function makeToken(payload: object, expirationTime = "7d") {
+  return new SignJWT({ ...payload })
+    .setProtectedHeader({ alg: "HS256" })
+    .setExpirationTime(expirationTime)
+    .setIssuedAt()
+    .sign(JWT_SECRET);
+}
+
+test("getSession returns null when no cookie is present", async () => {
+  mockCookieGet.mockReturnValue(undefined);
+
+  const session = await getSession();
+  expect(session).toBeNull();
+});
+
+test("getSession returns the session payload for a valid token", async () => {
+  const token = await makeToken({ userId: "user-123", email: "test@example.com" });
+  mockCookieGet.mockReturnValue({ value: token });
+
+  const session = await getSession();
+  expect(session?.userId).toBe("user-123");
+  expect(session?.email).toBe("test@example.com");
+});
+
+test("getSession returns null for a malformed token", async () => {
+  mockCookieGet.mockReturnValue({ value: "not.a.valid.jwt" });
+
+  const session = await getSession();
+  expect(session).toBeNull();
+});
+
+test("getSession returns null for an expired token", async () => {
+  const token = await makeToken(
+    { userId: "user-123", email: "test@example.com" },
+    "1s"
+  );
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  mockCookieGet.mockReturnValue({ value: token });
+
+  const session = await getSession();
+  expect(session).toBeNull();
 });
